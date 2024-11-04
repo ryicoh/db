@@ -50,6 +50,19 @@ func (i *inMemoryMap[V]) Put(key []byte, value V) {
 	i.m[keyBase64] = value
 }
 
+// GetAllKeys implements InMemoryMap.
+func (i *inMemoryMap[V]) GetAllKeys() [][]byte {
+	keys := make([][]byte, 0, len(i.m))
+	for key := range i.m {
+		decodedKey, err := i.base64ToBytes(key)
+		if err != nil {
+			panic(err)
+		}
+		keys = append(keys, decodedKey)
+	}
+	return keys
+}
+
 func (i *inMemoryMap[V]) bytesToBase64(b []byte) string {
 	return base64.StdEncoding.WithPadding(base64.StdPadding).EncodeToString(b)
 }
