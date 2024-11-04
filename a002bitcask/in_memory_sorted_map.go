@@ -6,6 +6,16 @@ import (
 	"github.com/google/btree"
 )
 
+type InMemorySortedMap interface {
+	Put(key, value []byte)
+	Get(key []byte) ([]byte, bool)
+	Has(key []byte) bool
+	Len() int
+	Delete(key []byte) bool
+	Ascend(from []byte, fn func(key, value []byte) bool)
+	Descend(from []byte, fn func(key, value []byte) bool)
+}
+
 type item struct {
 	key   []byte
 	value []byte
@@ -17,7 +27,7 @@ type inMemorySortedMap struct {
 
 var _ InMemorySortedMap = (*inMemorySortedMap)(nil)
 
-func newInMemorySortedMap() *inMemorySortedMap {
+func NewInMemorySortedMap() *inMemorySortedMap {
 	return &inMemorySortedMap{
 		tree: btree.NewG[*item](32, func(a, b *item) bool {
 			return bytes.Compare(a.key, b.key) < 0

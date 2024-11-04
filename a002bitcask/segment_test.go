@@ -11,7 +11,7 @@ import (
 func TestPut(t *testing.T) {
 	dir := createTempDir(t)
 
-	seg, err := NewSegment(dir, 1)
+	seg, err := NewSegment(segmentFileName(dir, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestPut(t *testing.T) {
 func TestDelete(t *testing.T) {
 	dir := createTempDir(t)
 
-	seg, err := NewSegment(dir, 1)
+	seg, err := NewSegment(segmentFileName(dir, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestNewSegment(t *testing.T) {
 
 	// prepare a data file
 	{
-		file, err := openFile(dir, 1)
+		file, err := openFile(segmentFileName(dir, 1))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,7 +210,7 @@ func TestNewSegment(t *testing.T) {
 		}
 	}
 
-	seg, err := NewSegment(dir, 1)
+	seg, err := NewSegment(segmentFileName(dir, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestNewSegment(t *testing.T) {
 func TestGet(t *testing.T) {
 	dir := createTempDir(t)
 
-	seg, err := NewSegment(dir, 1)
+	seg, err := NewSegment(segmentFileName(dir, 1))
 	if err != nil {
 		t.Fatal(err)
 	}

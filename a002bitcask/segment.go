@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"unsafe"
 )
@@ -59,8 +58,8 @@ type Segment struct {
 	offset  int64
 }
 
-func NewSegment(dir string, segmentId int) (*Segment, error) {
-	file, err := openFile(dir, segmentId)
+func NewSegment(fileName string) (*Segment, error) {
+	file, err := openFile(fileName)
 	if err != nil {
 		return nil, err
 	}
@@ -199,9 +198,12 @@ func (seg *Segment) Get(key []byte) ([]byte, error) {
 	return value, nil
 }
 
-func openFile(dir string, segmentId int) (*os.File, error) {
-	filePath := filepath.Join(dir, fmt.Sprintf("segment_%d.data", segmentId))
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0644)
+func (seg *Segment) Size() int64 {
+	return seg.offset
+}
+
+func openFile(fileName string) (*os.File, error) {
+	file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		return nil, err
 	}

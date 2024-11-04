@@ -3,10 +3,10 @@ package a002bitcask_test
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
-	"db/a001simple"
 	"db/a002bitcask"
 
 	"golang.org/x/exp/rand"
@@ -14,7 +14,10 @@ import (
 
 func TestDB(t *testing.T) {
 	dir := createTempDir(t)
-	db := a002bitcask.NewDB(dir)
+	db, err := a002bitcask.NewDB(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// put "key1", then get it
 	dbPut(t, db, "key1", "value1")
@@ -28,7 +31,7 @@ func TestDB(t *testing.T) {
 
 	// get "key2", which is not put yet, should return ErrNotFound
 	_, err = dbGet(t, db, "key2")
-	if err != a001simple.ErrNotFound {
+	if err != a002bitcask.ErrKeyNotFound {
 		t.Fatal(err)
 	}
 
@@ -55,14 +58,21 @@ func TestDB(t *testing.T) {
 	// delete "key1"
 	dbDelete(t, db, "key1")
 	_, err = dbGet(t, db, "key1")
-	if err != a001simple.ErrNotFound {
+	if err != a002bitcask.ErrKeyNotFound {
+		t.Fatal(err)
+	}
+
+	if err := db.CompactAndMerge(); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func BenchmarkDBPut(b *testing.B) {
 	dir := createTempDir(b)
-	db := a002bitcask.NewDB(dir)
+	db, err := a002bitcask.NewDB(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	b.StopTimer()
@@ -74,11 +84,28 @@ func BenchmarkDBPut(b *testing.B) {
 		dbPut(b, db, key, value)
 		b.StopTimer()
 	}
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	b.Logf("alloc: %d MB\n", memStats.Alloc/1024/1024)
+
+	// 100000x
+	// 2744 ns/op
+	// 380,373 ops
+	// alloc: 9 MB
+
+	// 1000000x
+	// 2755 ns/op
+	// 362,976 ops
+	// alloc: 73 MB
 }
 
 func BenchmarkDBGet(b *testing.B) {
 	dir := createTempDir(b)
-	db := a002bitcask.NewDB(dir)
+	db, err := a002bitcask.NewDB(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	keys := make([]string, b.N)
 	data := make(map[string]string)
@@ -105,6 +132,23 @@ func BenchmarkDBGet(b *testing.B) {
 			b.Fatalf("value mismatch: %s != %s", v, data[keys[i]])
 		}
 	}
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	b.Logf("alloc: %d MB\n", memStats.Alloc/1024/1024)
+
+	// 100000x
+	// 2644 ns/op
+	// 378,214 ops
+	// alloc: 37 MB
+
+	// 1000000x
+	// 12119 ns/op
+	// 82,515 ops
+	// alloc: 396 MB
+
+	// 10000000x
+	// Test killed with quit: ran too long (11m0s).
 }
 
 const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -146,7 +190,7 @@ func dbDelete(tb testing.TB, db *a002bitcask.DB, key string) {
 func createTempDir(tb testing.TB) string {
 	tb.Helper()
 
-	dir := fmt.Sprintf("tmp/%s_%s", tb.Name(), time.Now().Format(time.RFC3339))
+	dir := fmt.Sprintf("tmp/%s_%s_%d", tb.Name(), time.Now().Format(time.RFC3339), rand.Intn(1000000))
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		tb.Fatal(err)
 	}
