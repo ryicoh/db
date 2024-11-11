@@ -9,8 +9,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func TestDBGroupCommit(t *testing.T) {
-	db, err := benchsync.OpenDBGroupCommit(filepath.Join(testDir, t.Name()))
+func TestDBGroupCommit2(t *testing.T) {
+	db, err := benchsync.OpenDBGroupCommit2(filepath.Join(testDir, t.Name()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,12 +30,14 @@ func TestDBGroupCommit(t *testing.T) {
 	}
 }
 
-func BenchmarkDBGroupCommit(b *testing.B) {
-	db, err := benchsync.OpenDBGroupCommit(filepath.Join(testDir, b.Name()))
+func BenchmarkDBGroupCommit2(b *testing.B) {
+	db, err := benchsync.OpenDBGroupCommit2(filepath.Join(testDir, b.Name()))
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer db.Close()
+
+	var eg errgroup.Group
 
 	pairs := make([]struct {
 		key, value []byte
@@ -45,24 +47,21 @@ func BenchmarkDBGroupCommit(b *testing.B) {
 		pairs[i].value = randomBytes(128)
 	}
 
-	var eg errgroup.Group
-
 	b.ResetTimer()
 	for _, pair := range pairs {
 		eg.Go(func() error {
 			return db.Put(pair.key, pair.value)
 		})
 	}
-
 	if err := eg.Wait(); err != nil {
 		b.Fatal(err)
 	}
 
 	// 1s
-	// 14412 ns/op
-	// 70000 ops
+	// 3641 ns/op
+	// 274,000 ops
 
 	// 10s
-	// 14658 ns/op
-	// 68000 ops
+	// 2932 ns/op
+	// 341,000 ops
 }
