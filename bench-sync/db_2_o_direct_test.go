@@ -32,28 +32,24 @@ func BenchmarkDBODirect(b *testing.B) {
 	}
 	defer db.Close()
 
+	pairs := make([]struct {
+		key, value []byte
+	}, b.N)
+	for i := 0; i < b.N; i++ {
+		pairs[i].key = randomBytes(32)
+		pairs[i].value = randomBytes(128)
+	}
+
 	var eg errgroup.Group
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		key := randomBytes(32)
-		value := randomBytes(128)
-
-		b.StartTimer()
 		eg.Go(func() error {
-			return db.Put(key, value)
+			return db.Put(pairs[i].key, pairs[i].value)
 		})
-		b.StopTimer()
 	}
 
-	// FIXME: not exact
-	{
-		b.StartTimer()
-		err := eg.Wait()
-		b.StopTimer()
-
-		if err != nil {
-			b.Fatal(err)
-		}
+	if err := eg.Wait(); err != nil {
+		b.Fatal(err)
 	}
 
 	// 1s
