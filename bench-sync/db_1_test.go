@@ -2,7 +2,6 @@ package benchsync_test
 
 import (
 	benchsync "db/bench-sync"
-	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -47,21 +46,19 @@ func BenchmarkDB1WithoutSync(b *testing.B) {
 	}
 	defer db.Close()
 
+	pairs := make([]struct {
+		key, value []byte
+	}, b.N)
+	for i := 0; i < b.N; i++ {
+		pairs[i].key = randomBytes(32)
+		pairs[i].value = randomBytes(128)
+	}
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		key := randomBytes(32)
-		value := randomBytes(128)
-		if i%10000 == 0 {
-			fmt.Printf("put %d / %d\n", i, b.N)
+		if err := db.Put(pairs[i].key, pairs[i].value); err != nil {
+			b.Fatal(err)
 		}
-
-		b.StartTimer()
-		{
-			if err := db.Put(key, value); err != nil {
-				b.Fatal(err)
-			}
-		}
-		b.StopTimer()
 	}
 
 	// 1s
