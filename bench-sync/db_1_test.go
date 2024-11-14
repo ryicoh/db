@@ -34,9 +34,13 @@ func BenchmarkDB1(b *testing.B) {
 	// 897503 ns/op
 	// 1114.2 OPS
 
-	// 10s
+	// 10s i5-14500 Linux
 	// 896903 ns/op
 	// 1189.5 OPS
+
+	// 10s Macbook Air M1 16GB/256GB
+	// 3836482 ns/op
+	// 260 ops
 }
 
 func BenchmarkDB1WithoutSync(b *testing.B) {
