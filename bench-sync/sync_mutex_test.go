@@ -2,6 +2,7 @@ package benchsync_test
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,9 +20,14 @@ type mutex struct {
 	wait time.Duration
 	mu   sync.Mutex
 }
+type atomicStruct struct {
+	wait time.Duration
+	num  atomic.Uint32
+}
 
 var _ put = &noMutex{}
 var _ put = &mutex{}
+var _ put = &atomicStruct{}
 
 func (n *noMutex) Put(key, value []byte) error {
 	time.Sleep(n.wait)
@@ -33,6 +39,12 @@ func (m *mutex) Put(key, value []byte) error {
 	defer m.mu.Unlock()
 
 	time.Sleep(m.wait)
+	return nil
+}
+
+func (a *atomicStruct) Put(key, value []byte) error {
+	a.num.Add(1)
+	time.Sleep(a.wait)
 	return nil
 }
 
@@ -109,6 +121,48 @@ func BenchmarkMutex(b *testing.B) {
 			}
 			if err := eg.Wait(); err != nil {
 				b.Fatal(err)
+			}
+		})
+	}
+
+	// goos: linux
+	// goarch: amd64
+	// pkg: db/bench-sync
+	// cpu: Intel(R) Core(TM) i5-14500
+	// BenchmarkMutex/0ns-20                    1000000               336.7 ns/op           109 B/op          2 allocs/op
+	// BenchmarkMutex/1ns-20                    1000000              1234 ns/op             380 B/op          3 allocs/op
+	// BenchmarkMutex/5ns-20                    1000000               977.9 ns/op           210 B/op          3 allocs/op
+	// BenchmarkMutex/10ns-20                   1000000               988.0 ns/op           205 B/op          3 allocs/op
+	// BenchmarkMutex/50ns-20                   1000000              1109 ns/op             203 B/op          3 allocs/op
+	// BenchmarkMutex/100ns-20                  1000000              1854 ns/op             306 B/op          3 allocs/op
+}
+
+func BenchmarkAtomic(b *testing.B) {
+
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			pairs := make([]struct {
+				key, value []byte
+			}, b.N)
+			for i := 0; i < b.N; i++ {
+				pairs[i].key = randomBytes(32)
+				pairs[i].value = randomBytes(128)
+			}
+
+			m := &atomicStruct{wait: bm.wait}
+
+			eg := errgroup.Group{}
+			b.ResetTimer()
+			for _, pair := range pairs {
+				eg.Go(func() error {
+					return m.Put(pair.key, pair.value)
+				})
+			}
+			if err := eg.Wait(); err != nil {
+				b.Fatal(err)
+			}
+			if m.num.Load() != uint32(b.N) {
+				b.Fatalf("expected %d, got %d", b.N, m.num.Load())
 			}
 		})
 	}
