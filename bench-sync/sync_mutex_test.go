@@ -64,9 +64,7 @@ func BenchmarkNoMutex(b *testing.B) {
 
 			b.ResetTimer()
 			for _, pair := range pairs {
-				b.StartTimer()
 				err := m.Put(pair.key, pair.value)
-				b.StopTimer()
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -74,16 +72,15 @@ func BenchmarkNoMutex(b *testing.B) {
 		})
 	}
 
-	// goos: linux
-	// goarch: amd64
+	// goos: darwin
+	// goarch: arm64
 	// pkg: db/bench-sync
-	// cpu: Intel(R) Core(TM) i5-14500
-	// BenchmarkNoMutex/0ns-20                  1000000                31.03 ns/op            0 B/op          0 allocs/op
-	// BenchmarkNoMutex/1ns-20                  1000000               287.2 ns/op             0 B/op          0 allocs/op
-	// BenchmarkNoMutex/5ns-20                  1000000               287.4 ns/op             0 B/op          0 allocs/op
-	// BenchmarkNoMutex/10ns-20                 1000000               275.9 ns/op             0 B/op          0 allocs/op
-	// BenchmarkNoMutex/50ns-20                 1000000               277.6 ns/op             0 B/op          0 allocs/op
-	// BenchmarkNoMutex/100ns-20                1000000               899.3 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/0ns-8           1000000                 2.212 ns/op           0 B/op          0 allocs/op
+	// BenchmarkNoMutex/1ns-8           1000000               221.8 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/5ns-8           1000000               209.7 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/10ns-8          1000000               214.8 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/50ns-8          1000000              1306 ns/op               0 B/op          0 allocs/op
+	// BenchmarkNoMutex/100ns-8         1000000              2292 ns/op               0 B/op          0 allocs/op
 }
 
 func BenchmarkMutex(b *testing.B) {
