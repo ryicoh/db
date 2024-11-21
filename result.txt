@@ -1,2 +1,0 @@
-signal: interrupt
-FAIL	db/bench-storage	258.282s
