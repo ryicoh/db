@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"golang.org/x/sync/errgroup"
@@ -14,7 +15,8 @@ import (
 )
 
 func TestDBGroupCommit4(t *testing.T) {
-	numPairs := 200
+	numPairs := int(1e5)
+	fmt.Println("numPairs:", numPairs)
 	pairs := make([]struct {
 		key, value []byte
 	}, numPairs)
@@ -71,23 +73,17 @@ func BenchmarkDBGroupCommit4(b *testing.B) {
 		putQueueCapacity   int
 		writeQueueCapacity int
 	}{
-		{1 << 10, 1 << 5, 1 << 0},
-		{1 << 10, 1 << 5, 1 << 0},
-		{1 << 10, 1 << 10, 1 << 0},
-		{1 << 10, 1 << 10, 1 << 0},
-		{1 << 10, 1 << 10, 1 << 10},
-		{1 << 10, 1 << 10, 1 << 10},
-		{1 << 10, 1 << 20, 1 << 10},
-		{1 << 10, 1 << 20, 1 << 10},
+		// {1 << 10, 1 << 5, 1 << 0},
+		// {1 << 10, 1 << 10, 1 << 0},
+		// {1 << 10, 1 << 10, 1 << 10},
+		// {1 << 10, 1 << 15, 1 << 10},
+		// {1 << 10, 1 << 15, 1 << 15},
 
-		{1 << 20, 1 << 5, 1 << 0},
-		{1 << 20, 1 << 5, 1 << 0},
-		{1 << 20, 1 << 10, 1 << 0},
-		{1 << 20, 1 << 10, 1 << 0},
-		{1 << 20, 1 << 10, 1 << 10},
-		{1 << 20, 1 << 10, 1 << 10},
-		{1 << 20, 1 << 20, 1 << 10},
-		{1 << 20, 1 << 20, 1 << 10},
+		// {1 << 15, 1 << 5, 1 << 0},
+		// {1 << 15, 1 << 10, 1 << 0},
+		// {1 << 15, 1 << 10, 1 << 10},
+		// {1 << 15, 1 << 15, 1 << 10},
+		{1 << 20, 1 << 18, 1 << 4},
 	}
 
 	for _, bm := range benchmarks {
@@ -132,7 +128,25 @@ func BenchmarkDBGroupCommit4(b *testing.B) {
 
 			b.StopTimer()
 
-			b.Logf("b.N: %d, stats: %s\n", b.N, db.Stats())
+			var stats runtime.MemStats
+			runtime.ReadMemStats(&stats)
+			b.Logf("b.N: %d, db: %s, mem: %.2fMB\n", b.N, db.Stats(), float64(stats.Alloc)/1e6)
 		})
 	}
+
+	// goos: linux
+	// goarch: amd64
+	// pkg: db/bench-sync
+	// cpu: Intel(R) Core(TM) i5-14500
+	// BenchmarkDBGroupCommit4/semaphoreWeight1048576_putQueueCapacity262144_writeQueueCapacity16-20           10897962               954.9 ns/op          4612 B/op          4 allocs/op
+	// --- BENCH: BenchmarkDBGroupCommit4/semaphoreWeight1048576_putQueueCapacity262144_writeQueueCapacity16-20
+	// 	db_5_group_commit4_test.go:133: b.N: 1, db: put:1|0/262144, write:1|0/16, notify:0/32, write:10.457905ms, interval:0s, mem: 32.95MB
+	// 	db_5_group_commit4_test.go:133: b.N: 100, db: put:100|99/262144, write:1|0/16, notify:0/32, write:3.037631ms, interval:0s, mem: 33.11MB
+	// 	db_5_group_commit4_test.go:133: b.N: 10000, db: put:10000|1436/262144, write:6|0/16, notify:0/32, write:1.00607ms, interval:1.349158ms, mem: 62.38MB
+	// 	db_5_group_commit4_test.go:133: b.N: 1000000, db: put:1000000|4179/262144, write:190|1/16, notify:0/32, write:2.000418ms, interval:3.794097ms, mem: 169.29MB
+	// 	db_5_group_commit4_test.go:133: b.N: 10897962, db: put:10897962|3438/262144, write:2608|2/16, notify:2/32, write:1.571448ms, interval:2.418201ms, mem: 737.39MB
+	// PASS
+	// ok      db/bench-sync   34.802s
+
+	// 1048218 op/s
 }
