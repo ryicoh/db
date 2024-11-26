@@ -8,15 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/montanaflynn/stats"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
 func TestDBGroupCommit4(t *testing.T) {
 	numPairs := int(1e5)
-	fmt.Println("numPairs:", numPairs)
 	pairs := make([]struct {
 		key, value []byte
 	}, numPairs)
@@ -69,7 +71,6 @@ func BenchmarkDBGroupCommit4(b *testing.B) {
 	os.MkdirAll(filepath.Join(testDir, b.Name()), 0o755)
 
 	benchmarks := []struct {
-		semaphoreWeight    int64
 		putQueueCapacity   int
 		writeQueueCapacity int
 	}{
@@ -83,23 +84,27 @@ func BenchmarkDBGroupCommit4(b *testing.B) {
 		// {1 << 15, 1 << 10, 1 << 0},
 		// {1 << 15, 1 << 10, 1 << 10},
 		// {1 << 15, 1 << 15, 1 << 10},
-		{1 << 20, 1 << 18, 1 << 4},
+		{1 << 20, 1 << 1},
 	}
 
+	key := randomBytes(32)
+	value := randomBytes(128)
+
 	for _, bm := range benchmarks {
-		b.Run(fmt.Sprintf("semaphoreWeight%d_putQueueCapacity%d_writeQueueCapacity%d", bm.semaphoreWeight, bm.putQueueCapacity, bm.writeQueueCapacity), func(b *testing.B) {
+		b.Run(fmt.Sprintf("putQueueCapacity%d_writeQueueCapacity%d", bm.putQueueCapacity, bm.writeQueueCapacity), func(b *testing.B) {
 			pairs := make([]struct {
 				key, value []byte
 			}, b.N)
 			for i := 0; i < b.N; i++ {
-				pairs[i].key = randomBytes(32)
-				pairs[i].value = randomBytes(128)
+				pairs[i].key = key
+				pairs[i].value = value
 			}
 
 			cfg := benchsync.DBGroupCommit4Config{
 				PutQueueCapacity:    bm.putQueueCapacity,
+				MaxBufferLen:        1 << 28, // 256MB
 				WriteQueueCapacity:  bm.writeQueueCapacity,
-				NotifyQueueCapacity: 32,
+				NotifyQueueCapacity: 4,
 			}
 			db, err := benchsync.OpenDBGroupCommit4(filepath.Join(testDir, b.Name()), cfg)
 			if err != nil {
@@ -109,28 +114,41 @@ func BenchmarkDBGroupCommit4(b *testing.B) {
 
 			db.StartWorkers(context.TODO())
 
-			var eg errgroup.Group
-			sem := semaphore.NewWeighted(bm.semaphoreWeight)
-			b.ResetTimer()
-			for _, pair := range pairs {
-				eg.Go(func() error {
-					if err := sem.Acquire(context.TODO(), 1); err != nil {
-						return err
-					}
-					defer sem.Release(1)
+			durations := make([]float64, 0, b.N)
+			durationMux := sync.Mutex{}
 
-					return db.Put(pair.key, pair.value)
-				})
+			var wg sync.WaitGroup
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					start := time.Now()
+					db.Put(key, value)
+
+					durationMux.Lock()
+					defer durationMux.Unlock()
+					durations = append(durations, float64(time.Since(start).Milliseconds()))
+				}()
 			}
-			if err := eg.Wait(); err != nil {
+
+			wg.Wait()
+			b.StopTimer()
+
+			average, err := stats.Mean(stats.Float64Data(durations))
+			if err != nil {
+				b.Fatal(err)
+			}
+			relency, err := stats.Percentile(stats.Float64Data(durations), 90)
+			if err != nil {
 				b.Fatal(err)
 			}
 
-			b.StopTimer()
-
 			var stats runtime.MemStats
 			runtime.ReadMemStats(&stats)
-			b.Logf("b.N: %d, db: %s, mem: %.2fMB\n", b.N, db.Stats(), float64(stats.Alloc)/1e6)
+
+			b.Logf("b.N: %d, db: %s, mem: %.2fMB, average: %.2fms, relency: %.2fms\n", b.N, db.Stats(), float64(stats.Alloc)/1e6, average, relency)
 		})
 	}
 

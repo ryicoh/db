@@ -6,9 +6,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/montanaflynn/stats"
 )
 
 type putTask struct {
@@ -31,6 +35,7 @@ type dbGroupCommit4 struct {
 	f *os.File
 
 	putQueueCapacity    int
+	maxBufferLen        int
 	writeQueueCapacity  int
 	notifyQueueCapacity int
 	putQueue            chan putTask
@@ -41,23 +46,24 @@ type dbGroupCommit4 struct {
 
 	cache map[string][]byte
 
-	numPut                           atomic.Uint64
-	numWrite                         atomic.Uint64
-	putQueueLenBeforeDequeue         atomic.Uint64
-	putQueueLenBeforeDequeueCount    atomic.Uint64
-	writeQueueLenBeforeDequeue       atomic.Uint64
-	writeQueueLenBeforeDequeueCount  atomic.Uint64
-	notifyQueueLenBeforeDequeue      atomic.Uint64
-	notifyQueueLenBeforeDequeueCount atomic.Uint64
-	writeElapsedNano                 atomic.Uint64
-	writeIntervalNano                atomic.Uint64
-	writePreviousTimeNano            atomic.Uint64
+	numPut                         atomic.Uint64
+	numWrite                       atomic.Uint64
+	putQueueLenBeforeEnqueue       []float64
+	putQueueLenBeforeEnqueueMux    sync.Mutex
+	writeQueueLenBeforeEnqueue     []float64
+	writeQueueLenBeforeEnqueueMux  sync.Mutex
+	notifyQueueLenBeforeEnqueue    []float64
+	notifyQueueLenBeforeEnqueueMux sync.Mutex
+	writeElapsedNano               atomic.Uint64
+	writeIntervalNano              atomic.Uint64
+	writePreviousTimeNano          atomic.Uint64
 }
 
 var _ DB = (*dbGroupCommit4)(nil)
 
 type DBGroupCommit4Config struct {
 	PutQueueCapacity    int
+	MaxBufferLen        int
 	WriteQueueCapacity  int
 	NotifyQueueCapacity int
 }
@@ -68,13 +74,17 @@ func OpenDBGroupCommit4(path string, cfg DBGroupCommit4Config) (*dbGroupCommit4,
 		return nil, err
 	}
 	return &dbGroupCommit4{
-		f:                   f,
-		putQueueCapacity:    cfg.PutQueueCapacity,
-		writeQueueCapacity:  cfg.WriteQueueCapacity,
-		notifyQueueCapacity: cfg.NotifyQueueCapacity,
-		putQueue:            make(chan putTask, cfg.PutQueueCapacity),
-		writeQueue:          make(chan writeTask, cfg.WriteQueueCapacity),
-		notifyQueue:         make(chan notifyTask, cfg.NotifyQueueCapacity),
+		f:                           f,
+		maxBufferLen:                cfg.MaxBufferLen,
+		putQueueCapacity:            cfg.PutQueueCapacity,
+		writeQueueCapacity:          cfg.WriteQueueCapacity,
+		notifyQueueCapacity:         cfg.NotifyQueueCapacity,
+		putQueue:                    make(chan putTask, cfg.PutQueueCapacity),
+		writeQueue:                  make(chan writeTask, cfg.WriteQueueCapacity),
+		notifyQueue:                 make(chan notifyTask, cfg.NotifyQueueCapacity),
+		putQueueLenBeforeEnqueue:    make([]float64, 0, cfg.PutQueueCapacity),
+		writeQueueLenBeforeEnqueue:  make([]float64, 0, cfg.WriteQueueCapacity),
+		notifyQueueLenBeforeEnqueue: make([]float64, 0, cfg.NotifyQueueCapacity),
 	}, nil
 }
 
@@ -95,33 +105,32 @@ func (db *dbGroupCommit4) putLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case firstTask := <-db.putQueue:
-			tasks := make([]putTask, 0, db.putQueueCapacity)
-			tasks = append(tasks, firstTask)
 			errChs := make([]chan error, 0, db.putQueueCapacity)
 			errChs = append(errChs, firstTask.errCh)
+			buffer := make([]byte, 0, db.maxBufferLen/2)
+			buffer = append(buffer, db.tupleToBuffer(firstTask.key, firstTask.value)...)
 
-			db.putQueueLenBeforeDequeue.Add(uint64(len(db.putQueue)))
-			db.putQueueLenBeforeDequeueCount.Add(1)
+			// after := time.After(32 * time.Microsecond)
+
 			// dequeue tasks from putQueue until the queue is empty or the batch is full
-			for queueLen := len(db.putQueue); 0 < queueLen && queueLen < db.putQueueCapacity; queueLen = len(db.putQueue) {
-				task := <-db.putQueue
-				tasks = append(tasks, task)
-				errChs = append(errChs, task.errCh)
+			for queueLen := len(db.putQueue); 0 < queueLen && queueLen < db.putQueueCapacity && len(buffer) < int(float64(db.maxBufferLen)/2.5); queueLen = len(db.putQueue) {
+				select {
+				case <-ctx.Done():
+					return
+				// case <-after:
+				// goto end
+				case task := <-db.putQueue:
+					buffer = append(buffer, db.tupleToBuffer(task.key, task.value)...)
+					errChs = append(errChs, task.errCh)
+				}
 			}
-
-			// calculate the buffer size
-			bufferSize := 0
-			for _, task := range tasks {
-				bufferSize += len(task.value) + len(task.key) + 8
-			}
-
-			// create the buffer
-			buffer := make([]byte, 0, bufferSize)
-			for _, task := range tasks {
-				buffer = append(buffer, db.tupleToBuffer(task.key, task.value)...)
-			}
+			// end:
 
 			slog.Debug("queue len", "putQueue", len(db.putQueue), "writeQueue", len(db.writeQueue), "notifyQueue", len(db.notifyQueue))
+
+			db.writeQueueLenBeforeEnqueueMux.Lock()
+			db.writeQueueLenBeforeEnqueue = append(db.writeQueueLenBeforeEnqueue, float64(len(db.writeQueue)))
+			db.writeQueueLenBeforeEnqueueMux.Unlock()
 			// enqueue the buffer to the writeQueue
 			db.writeQueue <- writeTask{buffer: buffer, errChs: errChs}
 		}
@@ -148,6 +157,10 @@ func (db *dbGroupCommit4) tupleToBuffer(key, value []byte) []byte {
 
 func (db *dbGroupCommit4) Put(key, value []byte) error {
 	errCh := make(chan error)
+
+	db.putQueueLenBeforeEnqueueMux.Lock()
+	db.putQueueLenBeforeEnqueue = append(db.putQueueLenBeforeEnqueue, float64(len(db.putQueue)))
+	db.putQueueLenBeforeEnqueueMux.Unlock()
 	db.putQueue <- putTask{key: key, value: value, errCh: errCh}
 
 	err := <-errCh
@@ -164,8 +177,6 @@ func (db *dbGroupCommit4) writeLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case task := <-db.writeQueue:
-			db.writeQueueLenBeforeDequeue.Add(uint64(len(db.writeQueue)))
-			db.writeQueueLenBeforeDequeueCount.Add(1)
 			db.write(task)
 		}
 	}
@@ -212,14 +223,15 @@ func (db *dbGroupCommit4) notifyLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case task := <-db.notifyQueue:
-			db.notifyQueueLenBeforeDequeue.Add(uint64(len(db.notifyQueue)))
-			db.notifyQueueLenBeforeDequeueCount.Add(1)
 			db.notifyErr(task)
 		}
 	}
 }
 
 func (db *dbGroupCommit4) enqueueNotify(errChs []chan error, err error) {
+	db.notifyQueueLenBeforeEnqueueMux.Lock()
+	db.notifyQueueLenBeforeEnqueue = append(db.notifyQueueLenBeforeEnqueue, float64(len(db.notifyQueue)))
+	db.notifyQueueLenBeforeEnqueueMux.Unlock()
 	db.notifyQueue <- notifyTask{errChs: errChs, err: err}
 }
 
@@ -280,12 +292,27 @@ func (db *dbGroupCommit4) buildCacheIfEmpty() error {
 func (db *dbGroupCommit4) Stats() string {
 	numPut := db.numPut.Load()
 	numWrite := db.numWrite.Load()
+
+	percentile := 90.0
+	putQueueLenBeforeEnqueue, err := stats.Percentile(db.putQueueLenBeforeEnqueue, percentile)
+	if err != nil {
+		panic(err)
+	}
+	writeQueueLenBeforeEnqueue, err := stats.Percentile(db.writeQueueLenBeforeEnqueue, percentile)
+	if err != nil {
+		panic(err)
+	}
+	notifyQueueLenBeforeEnqueue, err := stats.Percentile(db.notifyQueueLenBeforeEnqueue, percentile)
+	if err != nil {
+		panic(err)
+	}
+
 	return fmt.Sprintf(`put:%d|%d/%d, write:%d|%d/%d, notify:%d/%d, write:%s, interval:%s`,
 		numPut,
-		db.putQueueLenBeforeDequeue.Load()/db.putQueueLenBeforeDequeueCount.Load(), db.putQueueCapacity,
+		int(math.Round(putQueueLenBeforeEnqueue)), db.putQueueCapacity,
 		numWrite,
-		db.writeQueueLenBeforeDequeue.Load()/db.writeQueueLenBeforeDequeueCount.Load(), db.writeQueueCapacity,
-		db.notifyQueueLenBeforeDequeue.Load()/db.notifyQueueLenBeforeDequeueCount.Load(), db.notifyQueueCapacity,
+		int(math.Round(writeQueueLenBeforeEnqueue)), db.writeQueueCapacity,
+		int(math.Round(notifyQueueLenBeforeEnqueue)), db.notifyQueueCapacity,
 		time.Duration(db.writeElapsedNano.Load()/numWrite),
 		time.Duration(db.writeIntervalNano.Load()/numWrite),
 	)
