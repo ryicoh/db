@@ -1,9 +1,9 @@
-package benchsync_test
+package benchiouring_test
 
 import (
 	"bytes"
 	"context"
-	benchsync "db/bench-sync"
+	benchiouring "db/bench-iouring"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,11 +14,15 @@ import (
 
 	"github.com/montanaflynn/stats"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/semaphore"
 )
 
-func TestDBGroupCommit4(t *testing.T) {
-	numPairs := int(1e5)
+const testDir = "testdata"
+
+func TestDB(t *testing.T) {
+	fileName := filepath.Join(testDir, t.Name())
+	os.RemoveAll(fileName)
+
+	numPairs := int(1e7)
 	pairs := make([]struct {
 		key, value []byte
 	}, numPairs)
@@ -27,27 +31,21 @@ func TestDBGroupCommit4(t *testing.T) {
 		pairs[i].value = []byte(fmt.Sprintf("value%03d", i))
 	}
 
-	cfg := benchsync.DBGroupCommit4Config{
-		PutQueueCapacity:    1024,
-		WriteQueueCapacity:  1024,
-		NotifyQueueCapacity: 1024,
+	cfg := benchiouring.DBConfig{
+		Entries:         1,
+		PutQueueSize:    102400,
+		SubmitQueueSize: 0,
+		MaxBatchSize:    1 << 30, // 1GB
 	}
-	db, err := benchsync.OpenDBGroupCommit4(filepath.Join(testDir, t.Name()), cfg)
+	db, err := benchiouring.OpenDB(fileName, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
 
-	db.StartWorkers(context.TODO())
-	sem := semaphore.NewWeighted(10000)
+	db.Start(context.TODO())
 	var eg errgroup.Group
 	for _, pair := range pairs {
 		eg.Go(func() error {
-			if err := sem.Acquire(context.TODO(), 1); err != nil {
-				return err
-			}
-			defer sem.Release(1)
-
 			return db.Put(pair.key, pair.value)
 		})
 	}
@@ -55,6 +53,8 @@ func TestDBGroupCommit4(t *testing.T) {
 	if err := eg.Wait(); err != nil {
 		t.Fatal(err)
 	}
+
+	fmt.Println(db.Stats())
 
 	for _, pair := range pairs {
 		value, err := db.Get(pair.key)
@@ -67,12 +67,12 @@ func TestDBGroupCommit4(t *testing.T) {
 	}
 }
 
-func BenchmarkDBGroupCommit4(b *testing.B) {
+func BenchmarkDB(b *testing.B) {
 	os.MkdirAll(filepath.Join(testDir, b.Name()), 0o755)
 
 	benchmarks := []struct {
-		putQueueCapacity   int
-		writeQueueCapacity int
+		putQueueSize    int
+		submitQueueSize int
 	}{
 		// {1 << 10, 1 << 5, 1 << 0},
 		// {1 << 10, 1 << 10, 1 << 0},
@@ -84,44 +84,47 @@ func BenchmarkDBGroupCommit4(b *testing.B) {
 		// {1 << 15, 1 << 10, 1 << 0},
 		// {1 << 15, 1 << 10, 1 << 10},
 		// {1 << 15, 1 << 15, 1 << 10},
-		{1 << 20, 4},
+		{1 << 20, 1 << 1},
 	}
 
+	key := []byte("key1234567890")
+	value := []byte("value12345678901234567890")
+
 	for _, bm := range benchmarks {
-		b.Run(fmt.Sprintf("putQueueCapacity%d_writeQueueCapacity%d", bm.putQueueCapacity, bm.writeQueueCapacity), func(b *testing.B) {
+		b.Run(fmt.Sprintf("putQueueSize%d_submitQueueSize%d", bm.putQueueSize, bm.submitQueueSize), func(b *testing.B) {
 			pairs := make([]struct {
 				key, value []byte
 			}, b.N)
 			for i := 0; i < b.N; i++ {
-				pairs[i].key = randomBytes(32)
-				pairs[i].value = randomBytes(256)
+				pairs[i].key = key
+				pairs[i].value = value
 			}
 
-			cfg := benchsync.DBGroupCommit4Config{
-				PutQueueCapacity:    bm.putQueueCapacity,
-				MaxBufferLen:        1 << 28, // 256MB
-				WriteQueueCapacity:  bm.writeQueueCapacity,
-				NotifyQueueCapacity: 16,
+			cfg := benchiouring.DBConfig{
+				Entries:         64,
+				PutQueueSize:    bm.putQueueSize,
+				SubmitQueueSize: bm.submitQueueSize,
+				MaxBatchSize:    1 << 30, // 1GB
 			}
-			db, err := benchsync.OpenDBGroupCommit4(filepath.Join(testDir, b.Name()), cfg)
+			db, err := benchiouring.OpenDB(filepath.Join(testDir, b.Name()), cfg)
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer db.Close()
 
-			db.StartWorkers(context.TODO())
+			db.Start(context.TODO())
 
 			durations := make([]float64, 0, b.N)
 			durationMux := sync.Mutex{}
 
 			var wg sync.WaitGroup
 			b.ResetTimer()
+
 			for i := 0; i < b.N; i++ {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					start := time.Now()
-					db.Put(pairs[i].key, pairs[i].value)
+					db.Put(key, value)
 
 					durationMux.Lock()
 					defer durationMux.Unlock()
