@@ -1,11 +1,9 @@
 package benchsync_test
 
 import (
+	"fmt"
 	"sync"
 	"testing"
-	"time"
-
-	"golang.org/x/sync/errgroup"
 )
 
 type put interface {
@@ -13,18 +11,19 @@ type put interface {
 }
 
 type noMutex struct {
-	wait time.Duration
 }
 type mutex struct {
-	wait time.Duration
-	mu   sync.Mutex
+	mu sync.Mutex
+}
+type channel struct {
+	ch chan struct{}
 }
 
 var _ put = &noMutex{}
 var _ put = &mutex{}
 
 func (n *noMutex) Put(key, value []byte) error {
-	time.Sleep(n.wait)
+	// time.Sleep(n.wait)
 	return nil
 }
 
@@ -32,26 +31,29 @@ func (m *mutex) Put(key, value []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	time.Sleep(m.wait)
+	// time.Sleep(m.wait)
+	return nil
+}
+func (m *channel) Put(key, value []byte) error {
+	m.ch <- struct{}{}
+	<-m.ch
 	return nil
 }
 
 var benchmarks = []struct {
-	wait time.Duration
-	name string
+	batchSize int
 }{
-	{0, "0ns"},
-	{1 * time.Nanosecond, "1ns"},
-	{5 * time.Nanosecond, "5ns"},
-	{10 * time.Nanosecond, "10ns"},
-	{50 * time.Nanosecond, "50ns"},
-	{100 * time.Nanosecond, "100ns"},
+	{10},
+	// {1000},
+	// {10000},
+	// {100000},
+	// {1000000},
 }
 
 func BenchmarkNoMutex(b *testing.B) {
 
 	for _, bm := range benchmarks {
-		b.Run(bm.name, func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d", bm.batchSize), func(b *testing.B) {
 			pairs := make([]struct {
 				key, value []byte
 			}, b.N)
@@ -60,14 +62,63 @@ func BenchmarkNoMutex(b *testing.B) {
 				pairs[i].value = randomBytes(128)
 			}
 
-			m := &noMutex{wait: bm.wait}
+			m := &noMutex{}
 
 			b.ResetTimer()
-			for _, pair := range pairs {
-				err := m.Put(pair.key, pair.value)
-				if err != nil {
-					b.Fatal(err)
+			n := b.N * 1000
+			wg := sync.WaitGroup{}
+			for i := 0; i < n; i++ {
+				for j := 0; j < bm.batchSize && i < n; j++ {
+					wg.Add(1)
+					go func(idx int) error {
+						defer wg.Done()
+						return m.Put(pairs[idx/1000].key, pairs[idx/1000].value)
+					}(i)
+					i++
 				}
+				wg.Wait()
+			}
+
+		})
+	}
+
+	// goos: darwin
+	// goarch: arm64
+	// pkg: db/bench-sync
+	// BenchmarkNoMutex/100-8           1000000                 2.212 ns/op           0 B/op          0 allocs/op
+	// BenchmarkNoMutex/1000-8          1000000               221.8 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/10000-8         1000000               209.7 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/100000-8         1000000               214.8 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/50ns-8          1000000              1306 ns/op               0 B/op          0 allocs/op
+	// BenchmarkNoMutex/100ns-8         1000000              2292 ns/op               0 B/op          0 allocs/op
+}
+
+func BenchmarkMutex(b *testing.B) {
+	for _, bm := range benchmarks {
+		b.Run(fmt.Sprintf("%d", bm.batchSize), func(b *testing.B) {
+			pairs := make([]struct {
+				key, value []byte
+			}, b.N)
+			for i := 0; i < b.N; i++ {
+				pairs[i].key = randomBytes(32)
+				pairs[i].value = randomBytes(128)
+			}
+
+			m := &mutex{}
+
+			b.ResetTimer()
+			n := b.N * 1000
+			wg := sync.WaitGroup{}
+			for i := 0; i < n; i++ {
+				for j := 0; j < bm.batchSize && i < n; j++ {
+					wg.Add(1)
+					go func(idx int) error {
+						defer wg.Done()
+						return m.Put(pairs[idx/1000].key, pairs[idx/1000].value)
+					}(i)
+					i++
+				}
+				wg.Wait()
 			}
 		})
 	}
@@ -75,18 +126,17 @@ func BenchmarkNoMutex(b *testing.B) {
 	// goos: darwin
 	// goarch: arm64
 	// pkg: db/bench-sync
-	// BenchmarkNoMutex/0ns-8           1000000                 2.212 ns/op           0 B/op          0 allocs/op
-	// BenchmarkNoMutex/1ns-8           1000000               221.8 ns/op             0 B/op          0 allocs/op
-	// BenchmarkNoMutex/5ns-8           1000000               209.7 ns/op             0 B/op          0 allocs/op
-	// BenchmarkNoMutex/10ns-8          1000000               214.8 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/100-8           1000000                 2.212 ns/op           0 B/op          0 allocs/op
+	// BenchmarkNoMutex/1000-8          1000000               221.8 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/10000-8         1000000               209.7 ns/op             0 B/op          0 allocs/op
+	// BenchmarkNoMutex/100000-8         1000000               214.8 ns/op             0 B/op          0 allocs/op
 	// BenchmarkNoMutex/50ns-8          1000000              1306 ns/op               0 B/op          0 allocs/op
 	// BenchmarkNoMutex/100ns-8         1000000              2292 ns/op               0 B/op          0 allocs/op
 }
 
-func BenchmarkMutex(b *testing.B) {
-
+func BenchmarkChannel(b *testing.B) {
 	for _, bm := range benchmarks {
-		b.Run(bm.name, func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d", bm.batchSize), func(b *testing.B) {
 			pairs := make([]struct {
 				key, value []byte
 			}, b.N)
@@ -95,17 +145,23 @@ func BenchmarkMutex(b *testing.B) {
 				pairs[i].value = randomBytes(128)
 			}
 
-			m := &mutex{wait: bm.wait}
-
-			eg := errgroup.Group{}
-			b.ResetTimer()
-			for _, pair := range pairs {
-				eg.Go(func() error {
-					return m.Put(pair.key, pair.value)
-				})
+			m := &channel{
+				ch: make(chan struct{}, bm.batchSize),
 			}
-			if err := eg.Wait(); err != nil {
-				b.Fatal(err)
+
+			b.ResetTimer()
+			n := b.N * 1000
+			for i := 0; i < n; i++ {
+				wg := sync.WaitGroup{}
+				for j := 0; j < bm.batchSize && i < n; j++ {
+					wg.Add(1)
+					go func(idx int) error {
+						defer wg.Done()
+						return m.Put(pairs[idx/1000].key, pairs[idx/1000].value)
+					}(i)
+					i++
+				}
+				wg.Wait()
 			}
 		})
 	}
