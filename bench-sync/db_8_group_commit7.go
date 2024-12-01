@@ -2,8 +2,10 @@ package benchsync
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,26 +15,27 @@ type DB8 interface {
 }
 
 type db8Impl struct {
-	buffer     []byte
-	syncBuffer []byte
-	mutex      sync.Mutex
-	rotateCond *sync.Cond
-	syncCond   *sync.Cond
-	doneCond   *sync.Cond
-	f          *os.File
-	cache      map[string][]byte
+	buffer        []byte
+	maxBufferSize int
+	syncBuffer    []byte
+	mutex         sync.Mutex
+	rotateCond    *sync.Cond
+	syncCond      *sync.Cond
+	doneCond      *sync.Cond
+	f             *os.File
+	cache         map[string][]byte
 }
 
 var _ DB8 = &db8Impl{}
 
-func NewDB8(path string) *db8Impl {
+func NewDB8(path string, maxBufferSize int) *db8Impl {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		panic(err)
 	}
 
 	db := &db8Impl{
-		buffer: make([]byte, 0, 1<<20),
+		buffer: make([]byte, 0, maxBufferSize),
 		f:      f,
 	}
 	db.rotateCond = sync.NewCond(&db.mutex)
@@ -43,10 +46,10 @@ func NewDB8(path string) *db8Impl {
 	go db.syncWorker()
 
 	go func() {
-		// 最低でも 200ms に 1 回は rotate する
+		// 最低でも 100ms に 1 回は rotate する
 		for {
 			db.rotateCond.Signal()
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 
@@ -76,7 +79,7 @@ func (db *db8Impl) rotateWorker() {
 		db.rotateCond.L.Lock()
 		// 1MB 以上か、100ms 以上経過したら rotate する
 		// TODO: 条件部分をロックしなきゃいけない？
-		for len(db.buffer) < 1<<20 && time.Since(lastRotateAt) < 100*time.Millisecond {
+		for len(db.buffer) < db.maxBufferSize && time.Since(lastRotateAt) < 100*time.Millisecond {
 			db.rotateCond.Wait()
 		}
 		db.rotateCond.L.Unlock()
@@ -92,7 +95,7 @@ func (db *db8Impl) rotate() {
 	defer db.mutex.Unlock()
 
 	db.syncBuffer = db.buffer
-	db.buffer = make([]byte, 0, 1<<20)
+	db.buffer = make([]byte, 0, db.maxBufferSize)
 
 	db.syncCond.Signal()
 }
@@ -114,8 +117,30 @@ func (db *db8Impl) syncWorker() {
 	}
 }
 
+var syncTime time.Time
+
+var bufferSize = atomic.Int64{}
+var intervalMicros = atomic.Int64{}
+var writeMicros = atomic.Int64{}
+var writeCount = atomic.Int64{}
+
 // buffer をファイルに書き込んで、待ってる人全員に通知する
 func (db *db8Impl) sync(buffer []byte) error {
+	{
+		if !syncTime.IsZero() {
+			intervalMicros.Add(time.Since(syncTime).Microseconds())
+		}
+		syncTime = time.Now()
+
+		bufferSize.Add(int64(len(buffer)))
+	}
+
+	defer func() {
+		writeMicros.Add(time.Since(syncTime).Microseconds())
+		syncTime = time.Now()
+		writeCount.Add(1)
+	}()
+
 	if _, err := db.f.Write(buffer); err != nil {
 		return err
 	}
@@ -178,4 +203,13 @@ func (db *db8Impl) buildCacheIfEmpty() error {
 	}
 
 	return nil
+}
+
+func (db *db8Impl) PrintStats() {
+	fmt.Printf("writeCount: %d, interval: %dµs, write: %dµs, buffer: %d\n",
+		writeCount.Load(),
+		intervalMicros.Load()/writeCount.Load(),
+		writeMicros.Load()/writeCount.Load(),
+		bufferSize.Load()/writeCount.Load(),
+	)
 }

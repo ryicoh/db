@@ -4,6 +4,7 @@ import (
 	"bytes"
 	benchsync "db/bench-sync"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -22,7 +23,7 @@ func TestDBGroupCommit7(t *testing.T) {
 		pairs[i].value = []byte(fmt.Sprintf("value%03d", i))
 	}
 
-	db := benchsync.NewDB8(filepath.Join(testDir, t.Name()))
+	db := benchsync.NewDB8(filepath.Join(testDir, t.Name()), 1<<20)
 
 	var eg errgroup.Group
 	for _, pair := range pairs {
@@ -47,25 +48,41 @@ func TestDBGroupCommit7(t *testing.T) {
 }
 
 func BenchmarkDBGroupCommit7(b *testing.B) {
-	testFile := filepath.Join(testDir, b.Name())
+	os.MkdirAll(filepath.Join(testDir, b.Name()), 0755)
 
 	key := randomBytes(32)
 	value := randomBytes(256)
 
-	db := benchsync.NewDB8(testFile)
-
-	var wg sync.WaitGroup
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			db.Put(key, value)
-		}()
+	benchmarks := []struct {
+		name          string
+		maxBufferSize int
+	}{
+		{"1MB", 1 << 20},
+		{"16MB", 16 << 20},
+		{"64MB", 64 << 20},
+		{"256MB", 256 << 20},
 	}
-	wg.Wait()
 
-	b.StopTimer()
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			testFile := filepath.Join(testDir, b.Name())
+			db := benchsync.NewDB8(testFile, bm.maxBufferSize)
+
+			var wg sync.WaitGroup
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					db.Put(key, value)
+				}()
+			}
+			wg.Wait()
+
+			b.StopTimer()
+			db.PrintStats()
+		})
+	}
 
 	// goos: linux
 	// goarch: amd64
