@@ -5,132 +5,139 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-type DB8 interface {
+type DB9 interface {
 	Put(key, value []byte) error
 	Get(key []byte) ([]byte, error)
 }
 
-type db8Impl struct {
+type db9Impl struct {
 	buffer        []byte
 	syncBuffer    []byte
 	maxBufferSize int
-	mutex         sync.Mutex
-	rotateCond    *sync.Cond
+	mux           sync.Mutex
 	syncCond      *sync.Cond
 	doneCond      *sync.Cond
 	f             *os.File
 	cache         map[string][]byte
 }
 
-var _ DB8 = &db8Impl{}
+var _ DB9 = &db9Impl{}
 
-type DB8Config struct {
+type DB9Config struct {
 	Path          string
 	MaxBufferSize int
 	SyncInterval  time.Duration
 }
 
-func NewDB8(cfg DB8Config) (*db8Impl, error) {
+func NewDB9(cfg DB9Config) (*db9Impl, error) {
 	f, err := os.OpenFile(cfg.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, err
 	}
 
-	db := &db8Impl{
+	db := &db9Impl{
 		buffer:        make([]byte, 0, cfg.MaxBufferSize),
+		syncBuffer:    make([]byte, 0, cfg.MaxBufferSize),
 		f:             f,
 		maxBufferSize: cfg.MaxBufferSize,
 	}
-	db.rotateCond = sync.NewCond(&sync.Mutex{})
 	db.syncCond = sync.NewCond(&sync.Mutex{})
-	db.doneCond = sync.NewCond(&db.mutex)
+	db.doneCond = sync.NewCond(&sync.Mutex{})
 
-	go db.rotateWorker(cfg.SyncInterval)
 	go db.syncWorker()
 
 	go func() {
 		for {
-			db.rotateCond.Signal()
 			time.Sleep(cfg.SyncInterval)
+
+			db.mux.Lock()
+			db.rotate()
+			db.mux.Unlock()
+
 		}
 	}()
 
 	return db, nil
 }
 
-func (db *db8Impl) Put(key, value []byte) error {
+func (db *db9Impl) Put(key, value []byte) error {
 	pairBytes := pairToBytes(key, value)
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
+	db.append(pairBytes)
 
-	db.buffer = append(db.buffer, pairBytes...)
-
-	// rotate するように通知
-	db.rotateCond.Signal()
-
-	// fsync されるまで待機
-	db.doneCond.Wait()
+	db.wait()
 
 	return nil
 }
 
-// buffer が 1MB 以上か、100ms 以上経過したら rotate を呼び出す
-func (db *db8Impl) rotateWorker(interval time.Duration) {
-	lastRotateAt := time.Now()
-	for {
-		db.rotateCond.L.Lock()
-		for len(db.buffer) < db.maxBufferSize &&
-			time.Since(lastRotateAt) < interval {
-			db.rotateCond.Wait()
-		}
-		db.rotateCond.L.Unlock()
+func (db *db9Impl) append(data []byte) {
+	db.mux.Lock()
+	defer db.mux.Unlock()
 
+	fmt.Printf("%v <= %v\n", db.buffer, data)
+
+	// もし、追加するとあふれるなら rotate する
+	if len(db.buffer)+len(data) > db.maxBufferSize {
 		db.rotate()
-		lastRotateAt = time.Now()
 	}
+
+	db.buffer = append(db.buffer, data...)
+	fmt.Printf("buffer: %v\n", db.buffer)
+}
+
+func (db *db9Impl) wait() {
+	db.doneCond.L.Lock()
+	defer db.doneCond.L.Unlock()
+	db.doneCond.Wait()
 }
 
 // buffer を syncBuffer にコピーして、buffer を空にする
-func (db *db8Impl) rotate() {
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
+func (db *db9Impl) rotate() {
+	if len(db.buffer) == 0 {
+		return
+	}
 
-	db.syncBuffer = db.buffer
-	db.buffer = make([]byte, 0, db.maxBufferSize)
+	db.syncCond.L.Lock()
+	{
+		// db.syncBuffer が0 になるまで待つ
+		for len(db.syncBuffer) > 0 {
+			db.syncCond.Wait()
+		}
+
+		db.syncBuffer = db.syncBuffer[:len(db.buffer)]
+		copy(db.syncBuffer, db.buffer)
+		fmt.Printf("rotated,syncBuffer: %v\n", db.syncBuffer)
+	}
+	db.syncCond.L.Unlock()
+
+	db.buffer = db.buffer[:0]
 
 	db.syncCond.Signal()
 }
 
 // buffer が nil じゃなければ sync を呼び出す
-func (db *db8Impl) syncWorker() {
+func (db *db9Impl) syncWorker() {
 	for {
 		db.syncCond.L.Lock()
-		// buffer が rotate されるまで待機
-		for db.syncBuffer == nil {
+		// syncBuffer が nil でなくなるまで待機
+		for len(db.syncBuffer) == 0 {
 			db.syncCond.Wait()
 		}
 
-		bufferToSync := db.syncBuffer
-		db.syncBuffer = nil
+		bufferToSync := make([]byte, len(db.syncBuffer))
+		copy(bufferToSync, db.syncBuffer)
+		db.syncBuffer = db.syncBuffer[:0]
+
 		db.syncCond.L.Unlock()
 
 		db.sync(bufferToSync)
 	}
 }
 
-var syncTime time.Time
-
-var bufferSize = atomic.Int64{}
-var intervalMicros = atomic.Int64{}
-var writeMicros = atomic.Int64{}
-var writeCount = atomic.Int64{}
-
 // buffer をファイルに書き込んで、待ってる人全員に通知する
-func (db *db8Impl) sync(buffer []byte) error {
+func (db *db9Impl) sync(buffer []byte) error {
 	{
 		if !syncTime.IsZero() {
 			intervalMicros.Add(time.Since(syncTime).Microseconds())
@@ -150,29 +157,17 @@ func (db *db8Impl) sync(buffer []byte) error {
 		return err
 	}
 
-	//  fmt.Println("syncing", writeCount.Load())
 	if err := db.f.Sync(); err != nil {
 		return err
 	}
-	// fmt.Println("synced", writeCount.Load())
 
 	db.doneCond.Broadcast()
 
 	return nil
 }
 
-// key と value をバイト列に変換する
-func pairToBytes(key, value []byte) []byte {
-	buf := make([]byte, keyLenSize+len(key)+valueLenSize+len(value))
-	binary.BigEndian.PutUint32(buf[0:keyLenSize], uint32(len(key)))
-	copy(buf[keyLenSize:], key)
-	binary.BigEndian.PutUint32(buf[keyLenSize+len(key):], uint32(len(value)))
-	copy(buf[keyLenSize+len(key)+valueLenSize:], value)
-	return buf
-}
-
 // Get の処理はめっちゃてきとう
-func (db *db8Impl) Get(key []byte) ([]byte, error) {
+func (db *db9Impl) Get(key []byte) ([]byte, error) {
 	if err := db.buildCacheIfEmpty(); err != nil {
 		return nil, err
 	}
@@ -184,7 +179,7 @@ func (db *db8Impl) Get(key []byte) ([]byte, error) {
 	return nil, ErrKeyNotFound
 }
 
-func (db *db8Impl) buildCacheIfEmpty() error {
+func (db *db9Impl) buildCacheIfEmpty() error {
 	if db.cache != nil {
 		return nil
 	}
@@ -212,8 +207,8 @@ func (db *db8Impl) buildCacheIfEmpty() error {
 	return nil
 }
 
-func (db *db8Impl) PrintStats() {
-	fmt.Printf("writeCount: %d, interval: %dµs, write: %dµs, buffer: %d\n",
+func (db *db9Impl) PrintStats() {
+	fmt.Printf("  writeCount: %d, interval: %dµs, write: %dµs, buffer: %d\n",
 		writeCount.Load(),
 		intervalMicros.Load()/writeCount.Load(),
 		writeMicros.Load()/writeCount.Load(),

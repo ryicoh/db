@@ -13,8 +13,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func TestDBGroupCommit7(t *testing.T) {
-	numPairs := int(1000)
+func TestDBGroupCommit8(t *testing.T) {
+	testPath := filepath.Join(testDir, t.Name())
+	os.RemoveAll(testPath)
+
+	numPairs := int(3)
 	pairs := make([]struct {
 		key, value []byte
 	}, numPairs)
@@ -24,10 +27,10 @@ func TestDBGroupCommit7(t *testing.T) {
 		pairs[i].value = []byte(fmt.Sprintf("value%03d", i))
 	}
 
-	db, err := benchsync.NewDB8(benchsync.DB8Config{
-		Path:          filepath.Join(testDir, t.Name()),
-		MaxBufferSize: 1 << 20,
-		SyncInterval:  100 * time.Millisecond,
+	db, err := benchsync.NewDB9(benchsync.DB9Config{
+		Path:          testPath,
+		MaxBufferSize: 32,
+		SyncInterval:  10 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +58,7 @@ func TestDBGroupCommit7(t *testing.T) {
 	}
 }
 
-func BenchmarkDBGroupCommit7(b *testing.B) {
+func BenchmarkDBGroupCommit8(b *testing.B) {
 	os.MkdirAll(filepath.Join(testDir, b.Name()), 0755)
 
 	key := randomBytes(32)
@@ -83,7 +86,7 @@ func BenchmarkDBGroupCommit7(b *testing.B) {
 	for _, bm := range benchmarks {
 		b.Run(bm.name, func(b *testing.B) {
 			testFile := filepath.Join(testDir, b.Name())
-			db, err := benchsync.NewDB8(benchsync.DB8Config{
+			db, err := benchsync.NewDB9(benchsync.DB9Config{
 				Path:          testFile,
 				MaxBufferSize: bm.maxBufferSize,
 				SyncInterval:  bm.syncInterval,
@@ -105,7 +108,7 @@ func BenchmarkDBGroupCommit7(b *testing.B) {
 			}
 			wg.Wait()
 
-			db.PrintStats()
+			// db.PrintStats()
 		})
 	}
 
