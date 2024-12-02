@@ -15,15 +15,14 @@ type DB8 interface {
 }
 
 type db8Impl struct {
-	buffer        []byte
-	syncBuffer    []byte
-	maxBufferSize int
-	mutex         sync.Mutex
-	rotateCond    *sync.Cond
-	syncCond      *sync.Cond
-	doneCond      *sync.Cond
-	f             *os.File
-	cache         map[string][]byte
+	buffer         []byte
+	syncBuffer     []byte
+	maxBufferSize  int
+	bufferCond     *sync.Cond
+	syncBufferCond *sync.Cond
+	doneCond       *sync.Cond
+	f              *os.File
+	cache          map[string][]byte
 }
 
 var _ DB8 = &db8Impl{}
@@ -42,19 +41,20 @@ func NewDB8(cfg DB8Config) (*db8Impl, error) {
 
 	db := &db8Impl{
 		buffer:        make([]byte, 0, cfg.MaxBufferSize),
+		syncBuffer:    make([]byte, 0, cfg.MaxBufferSize),
 		f:             f,
 		maxBufferSize: cfg.MaxBufferSize,
 	}
-	db.rotateCond = sync.NewCond(&sync.Mutex{})
-	db.syncCond = sync.NewCond(&sync.Mutex{})
-	db.doneCond = sync.NewCond(&db.mutex)
+	db.bufferCond = sync.NewCond(&sync.Mutex{})
+	db.syncBufferCond = sync.NewCond(&sync.Mutex{})
+	db.doneCond = sync.NewCond(&sync.Mutex{})
 
 	go db.rotateWorker(cfg.SyncInterval)
 	go db.syncWorker()
 
 	go func() {
 		for {
-			db.rotateCond.Signal()
+			db.bufferCond.Signal()
 			time.Sleep(cfg.SyncInterval)
 		}
 	}()
@@ -64,16 +64,18 @@ func NewDB8(cfg DB8Config) (*db8Impl, error) {
 
 func (db *db8Impl) Put(key, value []byte) error {
 	pairBytes := pairToBytes(key, value)
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
 
+	db.bufferCond.L.Lock()
 	db.buffer = append(db.buffer, pairBytes...)
+	db.bufferCond.L.Unlock()
 
 	// rotate するように通知
-	db.rotateCond.Signal()
+	db.bufferCond.Signal()
 
 	// fsync されるまで待機
+	db.doneCond.L.Lock()
 	db.doneCond.Wait()
+	db.doneCond.L.Unlock()
 
 	return nil
 }
@@ -82,12 +84,12 @@ func (db *db8Impl) Put(key, value []byte) error {
 func (db *db8Impl) rotateWorker(interval time.Duration) {
 	lastRotateAt := time.Now()
 	for {
-		db.rotateCond.L.Lock()
+		db.bufferCond.L.Lock()
 		for len(db.buffer) < db.maxBufferSize &&
 			time.Since(lastRotateAt) < interval {
-			db.rotateCond.Wait()
+			db.bufferCond.Wait()
 		}
-		db.rotateCond.L.Unlock()
+		db.bufferCond.L.Unlock()
 
 		db.rotate()
 		lastRotateAt = time.Now()
@@ -96,29 +98,46 @@ func (db *db8Impl) rotateWorker(interval time.Duration) {
 
 // buffer を syncBuffer にコピーして、buffer を空にする
 func (db *db8Impl) rotate() {
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
+	db.bufferCond.L.Lock()
+	db.syncBufferCond.L.Lock()
+	defer db.bufferCond.L.Unlock()
+	defer db.syncBufferCond.L.Unlock()
+	defer db.syncBufferCond.Signal()
 
-	db.syncBuffer = db.buffer
-	db.buffer = make([]byte, 0, db.maxBufferSize)
+	if len(db.buffer) == 0 {
+		return
+	}
 
-	db.syncCond.Signal()
+	for len(db.syncBuffer) > 0 {
+		db.syncBufferCond.Wait()
+	}
+
+	if len(db.buffer) < cap(db.syncBuffer) {
+		db.syncBuffer = db.syncBuffer[:len(db.buffer)]
+	} else {
+		db.syncBuffer = make([]byte, len(db.buffer))
+	}
+
+	copy(db.syncBuffer, db.buffer)
+	db.buffer = db.buffer[:0]
 }
 
 // buffer が nil じゃなければ sync を呼び出す
 func (db *db8Impl) syncWorker() {
 	for {
-		db.syncCond.L.Lock()
+		db.syncBufferCond.L.Lock()
 		// buffer が rotate されるまで待機
-		for db.syncBuffer == nil {
-			db.syncCond.Wait()
+		for len(db.syncBuffer) == 0 {
+			db.syncBufferCond.Wait()
 		}
 
-		bufferToSync := db.syncBuffer
-		db.syncBuffer = nil
-		db.syncCond.L.Unlock()
+		syncBuffer := db.syncBuffer
+		db.syncBuffer = db.syncBuffer[:0]
+		db.syncBufferCond.L.Unlock()
 
-		db.sync(bufferToSync)
+		db.syncBufferCond.Signal()
+
+		db.sync(syncBuffer)
 	}
 }
 
@@ -213,7 +232,7 @@ func (db *db8Impl) buildCacheIfEmpty() error {
 }
 
 func (db *db8Impl) PrintStats() {
-	fmt.Printf("writeCount: %d, interval: %dµs, write: %dµs, buffer: %d\n",
+	fmt.Printf("-- writeCount: %d, interval: %dµs, write: %dµs, buffer: %d\n",
 		writeCount.Load(),
 		intervalMicros.Load()/writeCount.Load(),
 		writeMicros.Load()/writeCount.Load(),

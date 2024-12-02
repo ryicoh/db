@@ -14,7 +14,10 @@ import (
 )
 
 func TestDBGroupCommit7(t *testing.T) {
-	numPairs := int(1000)
+	testPath := filepath.Join(t.TempDir(), t.Name())
+	os.RemoveAll(testPath)
+
+	numPairs := int(10_000_000)
 	pairs := make([]struct {
 		key, value []byte
 	}, numPairs)
@@ -25,7 +28,7 @@ func TestDBGroupCommit7(t *testing.T) {
 	}
 
 	db, err := benchsync.NewDB8(benchsync.DB8Config{
-		Path:          filepath.Join(testDir, t.Name()),
+		Path:          testPath,
 		MaxBufferSize: 1 << 20,
 		SyncInterval:  100 * time.Millisecond,
 	})
@@ -33,6 +36,7 @@ func TestDBGroupCommit7(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	start := time.Now()
 	var eg errgroup.Group
 	for _, pair := range pairs {
 		eg.Go(func() error {
@@ -43,6 +47,8 @@ func TestDBGroupCommit7(t *testing.T) {
 	if err := eg.Wait(); err != nil {
 		t.Fatal(err)
 	}
+	db.PrintStats()
+	t.Logf("time: %s\n", time.Since(start))
 
 	for _, pair := range pairs {
 		value, err := db.Get(pair.key)
