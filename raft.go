@@ -1,4 +1,4 @@
-package raftdb
+package db
 
 import (
 	"context"

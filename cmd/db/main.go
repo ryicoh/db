@@ -13,7 +13,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
-	"github.com/ryicoh/raftdb"
+	"github.com/ryicoh/db"
 )
 
 func main() {
@@ -27,7 +27,7 @@ func main() {
 
 // コマンドのフラグを利用するための変数
 var (
-	//Raftのクラスタ内で利用する一意な名前
+	// Raftのクラスタ内で利用する一意な名前
 	// 例: node1
 	name string
 
@@ -44,7 +44,7 @@ var (
 	cluster string
 
 	// データを保存するためのディレクトリ
-	// 例: /tmp/raftdb
+	// 例: /tmp/db
 	datadir string
 
 	// デバッグモード
@@ -60,7 +60,7 @@ func initalizeFlags() {
 	flag.StringVar(&peerAddress, "peer-address", "localhost:8081", "Raftで通信するためのサーバアドレス")
 	flag.StringVar(&clientAddress, "client-address", "localhost:8091", "クライアントからのリクエストを受け付けるサーバアドレス")
 	flag.StringVar(&cluster, "cluster", "default=localhost:8081", "Raftのクラスタを設定するための`name`と`peer-address`のペア")
-	flag.StringVar(&datadir, "datadir", "/tmp/raftdb", "データを保存するためのディレクトリ")
+	flag.StringVar(&datadir, "datadir", "/tmp/db", "データを保存するためのディレクトリ")
 	flag.BoolVar(&debug, "debug", false, "デバッグモード")
 
 	flag.Parse()
@@ -70,27 +70,27 @@ func initalizeFlags() {
 		level = "info"
 	}
 	logger = hclog.New(&hclog.LoggerOptions{
-		Name:  "raftdb",
+		Name:  "db",
 		Level: hclog.LevelFromString(level),
 	})
 }
 
-func newStores() (raft.LogStore, raft.StableStore, raftdb.DataStore, error) {
+func newStores() (raft.LogStore, raft.StableStore, db.DataStore, error) {
 	if _, err := os.Stat(datadir); os.IsNotExist(err) {
 		if err := os.Mkdir(datadir, 0700); err != nil {
 			return nil, nil, nil, err
 		}
 	}
 
-	logStore, err := raftdb.NewRocksDBStore(path.Join(datadir, "log"), logger.Named("logstore"))
+	logStore, err := db.NewPebbleStore(path.Join(datadir, "log"), logger.Named("logstore"))
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	stableStore, err := raftdb.NewRocksDBStore(path.Join(datadir, "stable"), logger.Named("stablestore"))
+	stableStore, err := db.NewPebbleStore(path.Join(datadir, "stable"), logger.Named("stablestore"))
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	dataStore, err := raftdb.NewRocksDBStore(path.Join(datadir, "data"), logger.Named("datastore"))
+	dataStore, err := db.NewPebbleStore(path.Join(datadir, "data"), logger.Named("datastore"))
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -104,7 +104,7 @@ func run() error {
 		return err
 	}
 
-	node, err := raftdb.NewRaftNode(name, datadir, peerAddress, logStore, stableStore, dataStore, debug, logger)
+	node, err := db.NewRaftNode(name, datadir, peerAddress, logStore, stableStore, dataStore, debug, logger)
 	if err != nil {
 		return err
 	}
@@ -116,7 +116,7 @@ func run() error {
 		return err
 	}
 
-	apiserver := raftdb.NewAPIServer(node, dataStore, logStore)
+	apiserver := db.NewAPIServer(node, dataStore, logStore)
 	server := &http.Server{
 		Addr:    clientAddress,
 		Handler: apiserver,
@@ -131,7 +131,7 @@ func run() error {
 		}
 	}()
 
-	stop := make(chan os.Signal)
+	stop := make(chan os.Signal, 1)
 	defer close(stop)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 

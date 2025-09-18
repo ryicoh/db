@@ -1,22 +1,18 @@
-package raftdb
+package db
 
 import (
 	"encoding/json"
 	"fmt"
 	"strconv"
 
-	"github.com/flier/gorocksdb"
+	"github.com/cockroachdb/pebble"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 )
 
-// ストレージエンジンには、rocksdbを利用
-// https://github.com/facebook/rocksdb
-// Goで利用する場合は、gorocksdbを使う
-// 本家のgorocksdbはv6.15以上に対応していないため、
-// Pull Requestを出していた http://github.com/flier/gorocksdb を利用
-type RocksDBStore struct {
-	db     *gorocksdb.DB
+// ストレージエンジンには、pebbleを利用
+type PebbleStore struct {
+	db     *pebble.DB
 	logger hclog.Logger
 }
 
@@ -27,81 +23,81 @@ type DataStore interface {
 	Delete(key []byte) error
 }
 
-// RocksDBStoreが以下のインターフェイスを実装していることを保証する
+// PebbleStoreが以下のインターフェイスを実装していることを保証する
 // * raft.LogStore
 // * raft.StableStore
 // * DataStore
 var (
-	_logStore    raft.LogStore    = &RocksDBStore{}
-	_stableStore raft.StableStore = &RocksDBStore{}
-	_dataStore   DataStore        = &RocksDBStore{}
+	_ raft.LogStore    = &PebbleStore{}
+	_ raft.StableStore = &PebbleStore{}
+	_ DataStore        = &PebbleStore{}
 )
 
-// 読み書きのオプション
-// オプションを指定しない場合は、わざわざインスタンスを作る必要はないため、
-// こちらに変数を定義しておく
 var (
-	defaultReadOptions  = gorocksdb.NewDefaultReadOptions()
-	defaultWriteOptions = gorocksdb.NewDefaultWriteOptions()
+	writeOptions = &pebble.WriteOptions{Sync: true}
 )
 
-func NewRocksDBStore(name string, logger hclog.Logger) (*RocksDBStore, error) {
-	opts := gorocksdb.NewDefaultOptions()
-	opts.SetCreateIfMissing(true)
-	db, err := gorocksdb.OpenDb(opts, name)
+func NewPebbleStore(name string, logger hclog.Logger) (*PebbleStore, error) {
+	db, err := pebble.Open(name, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	return &RocksDBStore{db, logger}, nil
+	return &PebbleStore{db, logger}, nil
 }
 
 // Set, Get, GetUint64, SetUint64 は、raft.StableStore を実装
-func (r *RocksDBStore) Set(key []byte, val []byte) error {
+func (r *PebbleStore) Set(key []byte, val []byte) error {
 	r.logger.Debug("Set", "key", string(key), "val", string(val))
 
-	return r.db.Put(defaultWriteOptions, key, val)
+	return r.db.Set(key, val, writeOptions)
 }
 
-func (r *RocksDBStore) Get(key []byte) (val []byte, err error) {
+func (r *PebbleStore) Get(key []byte) (val []byte, err error) {
 	defer func() {
 		r.logger.Debug("Get", "key", string(key), "val", string(val))
 	}()
 
-	slice, err := r.db.Get(defaultReadOptions, key)
+	slice, closer, err := r.db.Get(key)
 	if err != nil {
+		if err == pebble.ErrNotFound {
+			return nil, nil
+		}
 		return nil, err
 	}
-	defer slice.Free()
+	defer closer.Close()
 
-	if slice.Data() == nil {
+	if slice == nil {
 		return nil, err
 	}
 
-	val = make([]byte, len(slice.Data()))
-	copy(val, slice.Data())
+	val = make([]byte, len(slice))
+	copy(val, slice)
 	return
 }
 
-func (r *RocksDBStore) Delete(key []byte) error {
+func (r *PebbleStore) Delete(key []byte) error {
 	r.logger.Debug("Delete", "key", string(key))
 
-	return r.db.Delete(defaultWriteOptions, key)
+	return r.db.Delete(key, writeOptions)
 }
 
-func (r *RocksDBStore) SetUint64(key []byte, val uint64) error {
+func (r *PebbleStore) SetUint64(key []byte, val uint64) error {
 	r.logger.Debug("SetUint64", "key", string(key), "val", val)
 
 	return r.Set(key, []byte(strconv.FormatUint(val, 10)))
 }
 
-func (r *RocksDBStore) GetUint64(key []byte) (u64 uint64, err error) {
+func (r *PebbleStore) GetUint64(key []byte) (u64 uint64, err error) {
 	defer func() {
 		r.logger.Debug("GetUint64", "key", string(key), "val", u64)
 	}()
 
 	val, err := r.Get(key)
 	if err != nil {
+		if err == pebble.ErrNotFound {
+			return 0, nil
+		}
 		return 0, err
 	}
 
@@ -114,17 +110,19 @@ func (r *RocksDBStore) GetUint64(key []byte) (u64 uint64, err error) {
 }
 
 // FirstIndex, LastIndex, GetLog, StoreLog, StoreLogs, DeleteRange は、raft.LogStore を実装
-func (r *RocksDBStore) FirstIndex() (index uint64, err error) {
+func (r *PebbleStore) FirstIndex() (index uint64, err error) {
 	defer func() {
 		r.logger.Debug("FirstIndex", "firstIndex", fmt.Sprint(index))
 	}()
 
-	it := r.db.NewIterator(defaultReadOptions)
+	it, err := r.db.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		return 0, err
+	}
 	defer it.Close()
-	if it.SeekToFirst(); it.Valid() {
+	if it.First(); it.Valid() {
 		key := it.Key()
-		defer key.Free()
-		u64, err := strconv.ParseUint(string(key.Data()), 10, 0)
+		u64, err := strconv.ParseUint(string(key), 10, 0)
 		if err != nil {
 			return 0, err
 		}
@@ -133,17 +131,19 @@ func (r *RocksDBStore) FirstIndex() (index uint64, err error) {
 	return
 }
 
-func (r *RocksDBStore) LastIndex() (index uint64, err error) {
+func (r *PebbleStore) LastIndex() (index uint64, err error) {
 	defer func() {
 		r.logger.Debug("LastIndex", "lastIndex", fmt.Sprint(index))
 	}()
 
-	it := r.db.NewIterator(defaultReadOptions)
+	it, err := r.db.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		return 0, err
+	}
 	defer it.Close()
-	if it.SeekToLast(); it.Valid() {
+	if it.Last(); it.Valid() {
 		key := it.Key()
-		defer key.Free()
-		u64, err := strconv.ParseUint(string(key.Data()), 10, 0)
+		u64, err := strconv.ParseUint(string(key), 10, 0)
 		if err != nil {
 			return 0, err
 		}
@@ -152,7 +152,7 @@ func (r *RocksDBStore) LastIndex() (index uint64, err error) {
 	return
 }
 
-func (r *RocksDBStore) GetLog(index uint64, log *raft.Log) (err error) {
+func (r *PebbleStore) GetLog(index uint64, log *raft.Log) (err error) {
 	var val []byte
 	defer func() {
 		r.logger.Debug("GetLog", "index", fmt.Sprint(index), "log", string(val))
@@ -160,6 +160,9 @@ func (r *RocksDBStore) GetLog(index uint64, log *raft.Log) (err error) {
 
 	val, err = r.Get([]byte(strconv.FormatUint(index, 10)))
 	if err != nil {
+		if err == pebble.ErrNotFound {
+			return raft.ErrLogNotFound
+		}
 		return err
 	}
 	if val == nil {
@@ -169,7 +172,7 @@ func (r *RocksDBStore) GetLog(index uint64, log *raft.Log) (err error) {
 	return json.Unmarshal(val, log)
 }
 
-func (r *RocksDBStore) StoreLog(log *raft.Log) (err error) {
+func (r *PebbleStore) StoreLog(log *raft.Log) (err error) {
 	var val []byte
 	defer func() {
 		r.logger.Debug("StoreLog", "log", string(val))
@@ -183,7 +186,7 @@ func (r *RocksDBStore) StoreLog(log *raft.Log) (err error) {
 	return r.Set([]byte(strconv.FormatUint(log.Index, 10)), val)
 }
 
-func (r *RocksDBStore) StoreLogs(logs []*raft.Log) (err error) {
+func (r *PebbleStore) StoreLogs(logs []*raft.Log) (err error) {
 	var debugLogs []interface{}
 	for i, log := range logs {
 		val, err := json.Marshal(log)
@@ -195,30 +198,35 @@ func (r *RocksDBStore) StoreLogs(logs []*raft.Log) (err error) {
 	}
 	r.logger.Debug("StoreLog", debugLogs...)
 
-	wb := gorocksdb.NewWriteBatch()
+	batch := r.db.NewBatchWithSize(len(logs))
 	for _, log := range logs {
 		val, err := json.Marshal(log)
 		if err != nil {
 			return err
 		}
 
-		wb.Put([]byte(strconv.FormatUint(log.Index, 10)), val)
+		if err := batch.Set([]byte(strconv.FormatUint(log.Index, 10)), val, writeOptions); err != nil {
+			return err
+		}
 	}
 
-	return r.db.Write(gorocksdb.NewDefaultWriteOptions(), wb)
+	return batch.Commit(writeOptions)
 }
 
-func (r *RocksDBStore) DeleteRange(min uint64, max uint64) error {
+func (r *PebbleStore) DeleteRange(min uint64, max uint64) error {
 	r.logger.Debug("DeleteRange", "min", min, "max", max)
-	wb := gorocksdb.NewWriteBatch()
 
-	it := r.db.NewIterator(gorocksdb.NewDefaultReadOptions())
+	batch := r.db.NewBatchWithSize(0)
+
+	it, err := r.db.NewIter(&pebble.IterOptions{})
+	if err != nil {
+		return err
+	}
 
 	start := []byte(strconv.FormatUint(min, 10))
-	for it.Seek(start); it.Valid(); it.Next() {
+	for it.SeekGE(start); it.Valid(); it.Next() {
 		key := it.Key()
-		defer key.Free()
-		u64Key, err := strconv.ParseUint(string(key.Data()), 10, 0)
+		u64Key, err := strconv.ParseUint(string(key), 10, 0)
 		if err != nil {
 			return err
 		}
@@ -227,9 +235,11 @@ func (r *RocksDBStore) DeleteRange(min uint64, max uint64) error {
 			break
 		}
 
-		wb.Delete(key.Data())
+		if err := batch.Delete(key, writeOptions); err != nil {
+			return err
+		}
 	}
 	it.Close()
 
-	return r.db.Write(gorocksdb.NewDefaultWriteOptions(), wb)
+	return batch.Commit(writeOptions)
 }

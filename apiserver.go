@@ -1,8 +1,8 @@
-package raftdb
+package db
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,7 +18,7 @@ type APIServer struct {
 }
 
 // APIサーバは http.Handler を実装
-var _apiServer http.Handler = &APIServer{}
+var _ http.Handler = &APIServer{}
 
 func NewAPIServer(rf *RaftNode, dataStore DataStore, logStore raft.LogStore) *APIServer {
 	mux := http.NewServeMux()
@@ -73,7 +73,7 @@ func (a *APIServer) handleKey(rw http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPost, http.MethodPut:
-		value, err := ioutil.ReadAll(r.Body)
+		value, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(rw, "パスパラメータを取得できません", http.StatusBadRequest)
 			return
